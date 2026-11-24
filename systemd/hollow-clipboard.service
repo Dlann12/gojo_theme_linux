@@ -1,0 +1,14 @@
+[Unit]
+Description=Hollow Suite Wayland Clipboard History Daemon
+After=graphical-session.target cosmic-session.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=GDK_BACKEND=wayland
+ExecStart=/usr/bin/python3 %h/.local/bin/hollow-clipboard
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

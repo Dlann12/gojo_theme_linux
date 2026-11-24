@@ -1,0 +1,17 @@
+[Unit]
+Description=Gojo Satoru GPU Live Wallpaper (Wayland Layer-Shell + GLES2)
+After=graphical-session.target cosmic-session.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/gojo-live-wallpaper.env
+ExecStart=%h/.local/bin/gojo-live-wallpaper --image "${GOJO_IMAGE}" --theme "${GOJO_THEME}" --fps "${GOJO_FPS}" --brightness "${GOJO_BRIGHTNESS:-0.62}" --layer "${GOJO_LAYER}"
+ExecStartPost=/bin/sh -c 'sleep 0.5 && /usr/bin/systemctl --user try-restart gojo-desktop-widget.service'
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,36 @@
+[filter "lfs"]
+	process = git-lfs filter-process
+	required = true
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+[user]
+	name = Dlann12
+	email = padlan774@gmail.com
+[credential "https://github.com"]
+	helper = 
+	helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/usr/bin/gh auth git-credential
+[core]
+	pager = delta
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+	dark = true
+	side-by-side = true
+	line-numbers = true
+	syntax-theme = Dracula
+	file-style = bold "#c084fc"
+	file-decoration-style = "#c084fc" ul
+	hunk-header-decoration-style = "#38bdf8" box
+	hunk-header-style = file line-number syntax
+	line-numbers-left-style = "#64748b"
+	line-numbers-right-style = "#64748b"
+	line-numbers-minus-style = "#f87171"
+	line-numbers-plus-style = "#34d399"
+[merge]
+	conflictstyle = diff3
+[diff]
+	colorMoved = default

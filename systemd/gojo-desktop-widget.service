@@ -1,0 +1,13 @@
+[Unit]
+Description=Gojo Hollow Purple Desktop Clock Widget
+After=graphical-session.target cosmic-session.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/gojo-desktop-widget
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

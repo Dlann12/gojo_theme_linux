@@ -1,0 +1,1076 @@
+#!/usr/bin/env python3
+"""Gojo Hollow Purple Centered Bento Desktop Suite for Pop!_OS COSMIC (Wayland layer-shell)."""
+
+import calendar
+import ctypes
+import json
+import math
+import os
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from collections import deque
+from datetime import datetime
+
+import cairo
+import gi
+import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+
+HOST_BIN = os.path.expanduser("~/.local/libexec/gojo-widget-host")
+BG_CONFIG_PATH = os.path.expanduser("~/.config/cosmic/com.system76.CosmicBackground/v1/all")
+DEFAULT_WALLPAPER = "/home/kerja/Downloads/satoru-gojo-jujutsu-3840x2160-9292.jpg"
+WEATHER_CACHE_PATH = "/tmp/gojo_weather_cache.json"
+
+SCREEN_W = 1920
+SCREEN_H = 1080
+
+# Centered Bento surface layout:
+# Outer transparent padding = 16px around a 760x450 grid -> 792x482 surface
+PAD = 16
+GAP = 16
+GRID_W = 760
+TOP_H = 188
+BOT_H = 250
+BOT_W = (GRID_W - GAP) // 2  # 372px each
+SURF_W = GRID_W + PAD * 2    # 792
+SURF_H = TOP_H + GAP + BOT_H + PAD * 2  # 486
+POS_X = (SCREEN_W - SURF_W) // 2        # 564
+POS_Y = (SCREEN_H - SURF_H) // 2 + 12   # 309 (balanced below 32px top panel)
+
+CARD_BG_ALPHA = 0.0
+CARD_BORDER_ALPHA = 0.26
+
+DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+DAYS_SHORT_ID = ["SEN", "SEL", "RAB", "KAM", "JUM", "SAB", "MIN"]
+MONTHS_ID = [
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+    "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+]
+
+_libcairo = ctypes.CDLL("libcairo.so.2")
+_libpangocairo = ctypes.CDLL("libpangocairo-1.0.so.0")
+_libpango = ctypes.CDLL("libpango-1.0.so.0")
+_libgobject = ctypes.CDLL("libgobject-2.0.so.0")
+
+_libcairo.cairo_image_surface_create_for_data.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int
+]
+_libcairo.cairo_image_surface_create_for_data.restype = ctypes.c_void_p
+_libcairo.cairo_surface_flush.argtypes = [ctypes.c_void_p]
+_libcairo.cairo_surface_destroy.argtypes = [ctypes.c_void_p]
+_libcairo.cairo_create.argtypes = [ctypes.c_void_p]
+_libcairo.cairo_create.restype = ctypes.c_void_p
+_libcairo.cairo_destroy.argtypes = [ctypes.c_void_p]
+_libcairo.cairo_set_source_rgba.argtypes = [
+    ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double
+]
+_libcairo.cairo_move_to.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double]
+
+_libpangocairo.pango_cairo_create_layout.argtypes = [ctypes.c_void_p]
+_libpangocairo.pango_cairo_create_layout.restype = ctypes.c_void_p
+_libpangocairo.pango_cairo_show_layout.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+_libpango.pango_font_description_from_string.argtypes = [ctypes.c_char_p]
+_libpango.pango_font_description_from_string.restype = ctypes.c_void_p
+_libpango.pango_font_description_free.argtypes = [ctypes.c_void_p]
+_libpango.pango_layout_set_font_description.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_libpango.pango_layout_set_text.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+_libpango.pango_layout_set_width.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_libpango.pango_layout_set_ellipsize.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_libpango.pango_layout_set_alignment.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_libpango.pango_attr_list_new.restype = ctypes.c_void_p
+_libpango.pango_attr_list_insert.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_libpango.pango_attr_list_unref.argtypes = [ctypes.c_void_p]
+_libpango.pango_attr_letter_spacing_new.argtypes = [ctypes.c_int]
+_libpango.pango_attr_letter_spacing_new.restype = ctypes.c_void_p
+_libpango.pango_layout_set_attributes.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_libgobject.g_object_unref.argtypes = [ctypes.c_void_p]
+
+PANGO_SCALE = 1024
+PANGO_ALIGN_LEFT = 0
+PANGO_ALIGN_CENTER = 1
+PANGO_ALIGN_RIGHT = 2
+PANGO_ELLIPSIZE_END = 3
+
+
+def draw_text(
+    c_ctx: int,
+    x: float,
+    y: float,
+    text: str,
+    font_desc: str,
+    rgba: tuple[float, float, float, float],
+    align: str = "left",
+    width: float = -1,
+    letter_spacing: int = 0,
+    ellipsize: bool = False,
+    shadow: bool = True,
+) -> None:
+    layout = _libpangocairo.pango_cairo_create_layout(c_ctx)
+    desc = _libpango.pango_font_description_from_string(font_desc.encode("utf-8"))
+    _libpango.pango_layout_set_font_description(layout, desc)
+    _libpango.pango_font_description_free(desc)
+
+    attrs = None
+    if letter_spacing:
+        attrs = _libpango.pango_attr_list_new()
+        _libpango.pango_attr_list_insert(attrs, _libpango.pango_attr_letter_spacing_new(int(letter_spacing)))
+        _libpango.pango_layout_set_attributes(layout, attrs)
+
+    if width > 0:
+        _libpango.pango_layout_set_width(layout, int(width * PANGO_SCALE))
+        if ellipsize:
+            _libpango.pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END)
+    if align == "right":
+        _libpango.pango_layout_set_alignment(layout, PANGO_ALIGN_RIGHT)
+    elif align == "center":
+        _libpango.pango_layout_set_alignment(layout, PANGO_ALIGN_CENTER)
+    else:
+        _libpango.pango_layout_set_alignment(layout, PANGO_ALIGN_LEFT)
+
+    tb = text.encode("utf-8")
+    _libpango.pango_layout_set_text(layout, tb, len(tb))
+
+    if shadow and rgba[3] >= 0.35:
+        a = float(rgba[3])
+        halo_a = min(0.55, a * 0.38)
+        drop_a = min(0.82, a * 0.68)
+        for dx, dy, sa in (
+            (-0.7, 0.0, halo_a),
+            (0.7, 0.0, halo_a),
+            (0.0, -0.6, halo_a * 0.85),
+            (0.0, 1.3, drop_a),
+            (0.8, 1.7, halo_a),
+        ):
+            _libcairo.cairo_set_source_rgba(c_ctx, 0.03, 0.02, 0.08, sa)
+            _libcairo.cairo_move_to(c_ctx, float(x + dx), float(y + dy))
+            _libpangocairo.pango_cairo_show_layout(c_ctx, layout)
+
+    _libcairo.cairo_set_source_rgba(c_ctx, float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3]))
+    _libcairo.cairo_move_to(c_ctx, float(x), float(y))
+    _libpangocairo.pango_cairo_show_layout(c_ctx, layout)
+
+    if attrs:
+        _libpango.pango_attr_list_unref(attrs)
+    _libgobject.g_object_unref(layout)
+
+
+def rounded_rect_path(ctx: cairo.Context, x: float, y: float, w: float, h: float, r: float) -> None:
+    r = min(r, w / 2.0, h / 2.0)
+    ctx.new_sub_path()
+    ctx.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    ctx.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    ctx.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    ctx.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    ctx.close_path()
+
+
+class WallpaperBackdropCache:
+    """Provides real-time frosted acrylic crops from the active COSMIC wallpaper."""
+
+    def __init__(self):
+        self._state_sig = None
+        self._backdrop_surf = None
+        self._backdrop_buf = None
+
+    def get_wallpaper_path(self) -> str:
+        try:
+            if os.path.exists(BG_CONFIG_PATH):
+                txt = open(BG_CONFIG_PATH, "r", encoding="utf-8").read()
+                m = re.search(r'Path\("([^"]+)"\)', txt)
+                if m and os.path.exists(m.group(1)):
+                    return m.group(1)
+        except Exception:
+            pass
+        return DEFAULT_WALLPAPER
+
+    def get_surface(self) -> tuple[cairo.ImageSurface, bytearray] | None:
+        wp = self.get_wallpaper_path()
+        try:
+            mtime = os.path.getmtime(wp)
+        except OSError:
+            mtime = 0
+        sig = (wp, mtime)
+        if sig == self._state_sig and self._backdrop_surf is not None:
+            return (self._backdrop_surf, self._backdrop_buf)
+
+        try:
+            im = Image.open(wp).convert("RGB")
+            iw, ih = im.size
+            scale = max(SCREEN_W / iw, SCREEN_H / ih)
+            nw, nh = int(round(iw * scale)), int(round(ih * scale))
+            im = im.resize((nw, nh), Image.LANCZOS)
+            left = (nw - SCREEN_W) // 2
+            top = (nh - SCREEN_H) // 2
+            im = im.crop((left, top, left + SCREEN_W, top + SCREEN_H))
+            # Frosted acrylic blur + slight saturation lift + obsidian tint for crisp readability
+            im = ImageEnhance.Color(im).enhance(1.16)
+            im = im.filter(ImageFilter.GaussianBlur(radius=24))
+            arr = np.array(im, dtype=np.float32)
+            tint = np.array([10.0, 9.0, 24.0], dtype=np.float32)
+            blended = np.clip(arr * 0.54 + tint * 0.46, 0, 255).astype(np.uint8)
+
+            crop = blended[POS_Y:POS_Y + SURF_H, POS_X:POS_X + SURF_W]
+            alpha = 232
+            af = alpha / 255.0
+            bgra = np.empty((SURF_H, SURF_W, 4), dtype=np.uint8)
+            bgra[:, :, 0] = np.clip(crop[:, :, 2] * af, 0, 255).astype(np.uint8)
+            bgra[:, :, 1] = np.clip(crop[:, :, 1] * af, 0, 255).astype(np.uint8)
+            bgra[:, :, 2] = np.clip(crop[:, :, 0] * af, 0, 255).astype(np.uint8)
+            bgra[:, :, 3] = alpha
+
+            self._backdrop_buf = bytearray(bgra.tobytes())
+            self._backdrop_surf = cairo.ImageSurface.create_for_data(
+                self._backdrop_buf, cairo.FORMAT_ARGB32, SURF_W, SURF_H, SURF_W * 4
+            )
+            self._state_sig = sig
+            return (self._backdrop_surf, self._backdrop_buf)
+        except Exception:
+            return None
+
+
+def draw_glass_card(
+    ctx: cairo.Context,
+    cx: float,
+    cy: float,
+    cw: float,
+    ch: float,
+    cr: float,
+    backdrop: tuple[cairo.ImageSurface, bytearray] | None,
+) -> None:
+    if CARD_BORDER_ALPHA > 0:
+        rounded_rect_path(ctx, cx - 1, cy - 1, cw + 2, ch + 2, cr + 1)
+        ctx.set_source_rgba(0.04, 0.02, 0.10, 0.18)
+        ctx.set_line_width(3.0)
+        ctx.stroke()
+
+    if CARD_BG_ALPHA > 0:
+        ctx.save()
+        rounded_rect_path(ctx, cx, cy, cw, ch, cr)
+        ctx.clip()
+        if backdrop is not None:
+            bg_surf, _ = backdrop
+            ctx.set_source_surface(bg_surf, 0, 0)
+            ctx.paint_with_alpha(CARD_BG_ALPHA)
+        else:
+            ctx.set_source_rgba(0.05, 0.04, 0.11, CARD_BG_ALPHA)
+            ctx.paint()
+        ctx.restore()
+
+    if CARD_BORDER_ALPHA > 0:
+        rounded_rect_path(ctx, cx, cy, cw, ch, cr)
+        border_grad = cairo.LinearGradient(cx, cy, cx + cw, cy + ch)
+        border_grad.add_color_stop_rgba(0.0, 1.00, 0.94, 1.00, CARD_BORDER_ALPHA)
+        border_grad.add_color_stop_rgba(0.45, 0.86, 0.55, 0.99, CARD_BORDER_ALPHA * 0.72)
+        border_grad.add_color_stop_rgba(1.0, 0.52, 0.88, 0.99, CARD_BORDER_ALPHA * 0.85)
+        ctx.set_source(border_grad)
+        ctx.set_line_width(1.2)
+        ctx.stroke()
+
+
+def draw_glow_dot(ctx: cairo.Context, x: float, y: float, rgb=(0.96, 0.42, 0.98)) -> None:
+    halo = cairo.RadialGradient(x, y, 1, x, y, 10)
+    halo.add_color_stop_rgba(0.0, rgb[0], rgb[1], rgb[2], 0.95)
+    halo.add_color_stop_rgba(1.0, rgb[0], rgb[1], rgb[2], 0.0)
+    ctx.set_source(halo)
+    ctx.arc(x, y, 10, 0, 2 * math.pi)
+    ctx.fill()
+    ctx.set_source_rgba(1, 1, 1, 0.95)
+    ctx.arc(x, y, 2.8, 0, 2 * math.pi)
+    ctx.fill()
+
+
+def draw_gradient_divider(ctx: cairo.Context, x0: float, x1: float, y: float) -> None:
+    div_grad = cairo.LinearGradient(x0, y, x1, y)
+    div_grad.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
+    div_grad.add_color_stop_rgba(0.2, 0.92, 0.72, 1.0, 0.24)
+    div_grad.add_color_stop_rgba(0.8, 0.55, 0.88, 1.0, 0.24)
+    div_grad.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+    ctx.set_source(div_grad)
+    ctx.set_line_width(1.0)
+    ctx.move_to(x0, y)
+    ctx.line_to(x1, y)
+    ctx.stroke()
+
+
+def draw_weather_icon(ctx: cairo.Context, x: float, y: float, kind: str, is_night: bool) -> None:
+    if kind in ("sun", "partly"):
+        orb_x = x + (14 if kind == "partly" else 22)
+        orb_y = y + (14 if kind == "partly" else 20)
+        g = cairo.RadialGradient(orb_x, orb_y, 2, orb_x, orb_y, 17)
+        if is_night:
+            g.add_color_stop_rgba(0.0, 0.68, 0.92, 1.0, 0.95)
+            g.add_color_stop_rgba(1.0, 0.40, 0.80, 1.0, 0.0)
+        else:
+            g.add_color_stop_rgba(0.0, 1.0, 0.52, 0.94, 0.95)
+            g.add_color_stop_rgba(1.0, 0.84, 0.30, 0.96, 0.0)
+        ctx.set_source(g)
+        ctx.arc(orb_x, orb_y, 17, 0, 2 * math.pi)
+        ctx.fill()
+        ctx.set_source_rgba(1.0, 0.95, 1.0, 0.98)
+        ctx.arc(orb_x, orb_y, 8.5, 0, 2 * math.pi)
+        ctx.fill()
+
+    if kind in ("partly", "cloud", "rain", "storm"):
+        ctx.save()
+        ctx.set_source_rgba(0.03, 0.02, 0.08, 0.38)
+        ctx.arc(x + 17.8, y + 24.4, 8, 0, 2 * math.pi)
+        ctx.arc(x + 27.8, y + 19.4, 10, 0, 2 * math.pi)
+        ctx.arc(x + 35.8, y + 25.4, 7, 0, 2 * math.pi)
+        ctx.rectangle(x + 17.8, y + 22.4, 18, 10)
+        ctx.fill()
+
+        ctx.set_source_rgba(0.98, 0.96, 1.0, 0.96)
+        ctx.arc(x + 17, y + 23, 8, 0, 2 * math.pi)
+        ctx.arc(x + 27, y + 18, 10, 0, 2 * math.pi)
+        ctx.arc(x + 35, y + 24, 7, 0, 2 * math.pi)
+        ctx.rectangle(x + 17, y + 21, 18, 10)
+        ctx.fill()
+        ctx.restore()
+
+    if kind == "rain":
+        ctx.set_source_rgba(0.45, 0.91, 1.0, 0.98)
+        ctx.set_line_width(2.2)
+        ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+        for dx in (17, 25, 33):
+            ctx.move_to(x + dx, y + 34)
+            ctx.line_to(x + dx - 3, y + 40)
+            ctx.stroke()
+
+    if kind == "storm":
+        ctx.set_source_rgba(0.98, 0.45, 0.92, 0.98)
+        ctx.move_to(x + 27, y + 30)
+        ctx.line_to(x + 22, y + 37)
+        ctx.line_to(x + 26, y + 37)
+        ctx.line_to(x + 23, y + 43)
+        ctx.line_to(x + 31, y + 34)
+        ctx.line_to(x + 27, y + 34)
+        ctx.close_path()
+        ctx.fill()
+
+
+class TelemetryReader:
+    def __init__(self):
+        self._prev_total = None
+        self._prev_idle = None
+        self._prev_net = None
+        self._prev_net_t = None
+        self.dl_hist = deque([0.0] * 30, maxlen=30)
+        self.ul_hist = deque([0.0] * 30, maxlen=30)
+
+    def read_cpu_pct(self) -> float:
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                vals = [int(x) for x in f.readline().split()[1:9]]
+            idle = vals[3] + vals[4]
+            total = sum(vals)
+            if self._prev_total is None:
+                self._prev_total, self._prev_idle = total, idle
+                return 0.0
+            dt = total - self._prev_total
+            di = idle - self._prev_idle
+            self._prev_total, self._prev_idle = total, idle
+            return 0.0 if dt <= 0 else max(0.0, min(100.0, 100.0 * (dt - di) / dt))
+        except Exception:
+            return 0.0
+
+    def read_ram(self) -> tuple[float, float, float]:
+        try:
+            info = {}
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    k, v = line.split(":", 1)
+                    info[k] = int(v.strip().split()[0])
+            total_kb = info.get("MemTotal", 1)
+            used_kb = max(0, total_kb - info.get("MemAvailable", 0))
+            return used_kb / 1048576.0, total_kb / 1048576.0, 100.0 * used_kb / total_kb
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+    def read_battery_and_temp(self) -> tuple[int | None, str, int | None]:
+        cap, status = None, ""
+        try:
+            for name in sorted(os.listdir("/sys/class/power_supply")):
+                p = f"/sys/class/power_supply/{name}"
+                tpath = f"{p}/type"
+                if os.path.exists(tpath) and open(tpath).read().strip() == "Battery":
+                    cap = int(open(f"{p}/capacity").read().strip())
+                    status = open(f"{p}/status").read().strip()
+                    break
+        except Exception:
+            pass
+        temp_c = None
+        try:
+            for name in sorted(os.listdir("/sys/class/thermal")):
+                if name.startswith("thermal_zone"):
+                    t = int(open(f"/sys/class/thermal/{name}/temp").read().strip()) // 1000
+                    if 15 <= t <= 115:
+                        temp_c = t
+                        break
+        except Exception:
+            pass
+        return cap, status, temp_c
+
+    def read_disk_root(self) -> tuple[float, float, float]:
+        try:
+            st = os.statvfs("/")
+            total = (st.f_blocks * st.f_frsize) / (1024**3)
+            used = ((st.f_blocks - st.f_bfree) * st.f_frsize) / (1024**3)
+            avail = (st.f_bavail * st.f_frsize) / (1024**3)
+            pct = 100.0 * used / max(used + avail, 1e-3)
+            return used, total, pct
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+    def read_uptime_str(self) -> str:
+        try:
+            secs = int(float(open("/proc/uptime").read().split()[0]))
+            h, rem = divmod(secs, 3600)
+            m = rem // 60
+            return f"{h}j {m:02d}m" if h > 0 else f"{m}m"
+        except Exception:
+            return "--"
+
+    def read_network(self) -> tuple[str, bool, float, float]:
+        iface, online = None, False
+        try:
+            for name in sorted(os.listdir("/sys/class/net")):
+                if name == "lo" or name.startswith(("docker", "br-", "veth", "lxc", "waydroid", "virbr")):
+                    continue
+                state_p = f"/sys/class/net/{name}/operstate"
+                st = open(state_p).read().strip() if os.path.exists(state_p) else "down"
+                if st == "up":
+                    iface = name
+                    online = True
+                    break
+                if iface is None:
+                    iface = name
+        except Exception:
+            pass
+
+        if not iface:
+            return "offline", False, 0.0, 0.0
+
+        now_t = time.monotonic()
+        try:
+            rx = int(open(f"/sys/class/net/{iface}/statistics/rx_bytes").read().strip())
+            tx = int(open(f"/sys/class/net/{iface}/statistics/tx_bytes").read().strip())
+        except Exception:
+            return iface, online, 0.0, 0.0
+
+        if self._prev_net is None or self._prev_net_t is None:
+            self._prev_net = (rx, tx)
+            self._prev_net_t = now_t
+            return iface, online, 0.0, 0.0
+
+        dt = max(0.05, now_t - self._prev_net_t)
+        dl_bps = max(0.0, (rx - self._prev_net[0]) / dt)
+        ul_bps = max(0.0, (tx - self._prev_net[1]) / dt)
+        self._prev_net = (rx, tx)
+        self._prev_net_t = now_t
+        self.dl_hist.append(dl_bps)
+        self.ul_hist.append(ul_bps)
+        return iface, online, dl_bps, ul_bps
+
+
+class WeatherFetcher:
+    CODE_MAP = {
+        "113": ("Cerah", "sun"), "116": ("Cerah Berawan", "partly"),
+        "119": ("Berawan", "cloud"), "122": ("Mendung", "cloud"),
+        "143": ("Berkabut", "cloud"), "176": ("Hujan Ringan", "rain"),
+        "200": ("Hujan Petir", "storm"), "248": ("Kabut", "cloud"),
+        "260": ("Kabut Tebal", "cloud"), "263": ("Gerimis", "rain"),
+        "266": ("Gerimis", "rain"), "293": ("Hujan Ringan", "rain"),
+        "296": ("Hujan Ringan", "rain"), "299": ("Hujan Sedang", "rain"),
+        "302": ("Hujan Sedang", "rain"), "305": ("Hujan Deras", "rain"),
+        "308": ("Hujan Deras", "rain"), "353": ("Hujan Ringan", "rain"),
+        "356": ("Hujan Deras", "rain"), "359": ("Hujan Lebat", "rain"),
+        "386": ("Badai Petir", "storm"), "389": ("Badai Petir", "storm"),
+    }
+
+    def __init__(self):
+        self.data = {
+            "temp": "--", "feels": "--", "humidity": "--", "wind": "--",
+            "cond": "Memuat cuaca...", "icon": "cloud", "city": "Jakarta", "ver": 0,
+        }
+        self._load_cache()
+
+    def _load_cache(self):
+        try:
+            if os.path.exists(WEATHER_CACHE_PATH):
+                with open(WEATHER_CACHE_PATH, "r", encoding="utf-8") as f:
+                    self.data.update(json.load(f))
+        except Exception:
+            pass
+
+    def refresh_once(self):
+        try:
+            req = urllib.request.Request("https://wttr.in/?format=j1", headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                raw = json.loads(r.read().decode("utf-8"))
+            cc = raw["current_condition"][0]
+            area = raw.get("nearest_area", [{}])[0]
+            region = area.get("region", [{}])[0].get("value", "")
+            city = area.get("areaName", [{}])[0].get("value", "Jakarta")
+            city_disp = "Jakarta" if "jakarta" in region.lower() else (city or region or "Lokal")
+            code = str(cc.get("weatherCode", "119"))
+            cond_id, icon_kind = self.CODE_MAP.get(code, (cc.get("weatherDesc", [{}])[0].get("value", "Berawan"), "cloud"))
+            self.data = {
+                "temp": cc.get("temp_C", "--"),
+                "feels": cc.get("FeelsLikeC", "--"),
+                "humidity": cc.get("humidity", "--"),
+                "wind": cc.get("windspeedKmph", "--"),
+                "cond": cond_id,
+                "icon": icon_kind,
+                "city": city_disp,
+                "ver": self.data.get("ver", 0) + 1,
+            }
+            with open(WEATHER_CACHE_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.data, f)
+        except Exception:
+            pass
+
+    def start_loop(self):
+        def worker():
+            while True:
+                self.refresh_once()
+                time.sleep(900)
+        threading.Thread(target=worker, daemon=True).start()
+
+
+class MprisReader:
+    def __init__(self):
+        try:
+            self._bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        except Exception:
+            self._bus = None
+
+    def read(self) -> dict | None:
+        if not self._bus:
+            return None
+        try:
+            res = self._bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                "ListNames", None, None, Gio.DBusCallFlags.NONE, 150, None
+            )
+            names = [n for n in res.unpack()[0] if n.startswith("org.mpris.MediaPlayer2.")]
+            if not names:
+                return None
+
+            chosen = None
+            for name in names:
+                props = self._bus.call_sync(
+                    name, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties",
+                    "GetAll", GLib.Variant("(s)", ("org.mpris.MediaPlayer2.Player",)),
+                    None, Gio.DBusCallFlags.NONE, 150, None
+                ).unpack()[0]
+                status = props.get("PlaybackStatus", "Stopped")
+                if status in ("Playing", "Paused"):
+                    meta = props.get("Metadata", {})
+                    title = meta.get("xesam:title") or ""
+                    artists = meta.get("xesam:artist") or []
+                    artist = ", ".join(artists) if isinstance(artists, (list, tuple)) else str(artists)
+                    length_us = meta.get("mpris:length", 0) or 0
+                    pos_us = props.get("Position", 0) or 0
+                    player = name.split("org.mpris.MediaPlayer2.")[-1].split(".")[0].capitalize()
+                    chosen = {
+                        "player": player, "status": status,
+                        "title": title or "Tanpa Judul", "artist": artist or player,
+                        "pos_s": max(0, int(pos_us // 1_000_000)),
+                        "len_s": max(0, int(length_us // 1_000_000)),
+                    }
+                    if status == "Playing":
+                        return chosen
+            return chosen
+        except Exception:
+            return None
+
+
+def greeting_id(hour: int) -> str:
+    if 4 <= hour < 11:
+        return "Selamat Pagi"
+    if 11 <= hour < 15:
+        return "Selamat Siang"
+    if 15 <= hour < 18:
+        return "Selamat Sore"
+    return "Selamat Malam"
+
+
+def fmt_speed(bps: float) -> str:
+    if bps >= 1024 * 1024:
+        return f"{bps / (1024 * 1024):.1f} MB/s"
+    if bps >= 1024:
+        return f"{bps / 1024:.0f} KB/s"
+    return f"{bps:.0f} B/s"
+
+
+def draw_bar_track(ctx: cairo.Context, x: float, y: float, w: float, h: float, r: float) -> None:
+    rounded_rect_path(ctx, x, y, w, h, r)
+    ctx.set_source_rgba(0.04, 0.03, 0.10, 0.30)
+    ctx.fill_preserve()
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.18)
+    ctx.set_line_width(0.6)
+    ctx.stroke()
+
+
+def render_centered_suite(
+    buf: bytearray,
+    telemetry: TelemetryReader,
+    weather: WeatherFetcher,
+    mpris: MprisReader,
+    now: datetime,
+    backdrops: WallpaperBackdropCache,
+) -> bytes:
+    surface = cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_ARGB32, SURF_W, SURF_H, SURF_W * 4)
+    ctx = cairo.Context(surface)
+    ctx.set_operator(cairo.OPERATOR_SOURCE)
+    ctx.set_source_rgba(0, 0, 0, 0)
+    ctx.paint()
+    ctx.set_operator(cairo.OPERATOR_OVER)
+
+    backdrop = backdrops.get_surface() if CARD_BG_ALPHA > 0 else None
+    text_ops = []
+
+    # ==========================================================================
+    # CARD 1: HERO CLOCK + TELEMETRY (Top Row, full 760 x 188)
+    # ==========================================================================
+    c1x, c1y, c1w, c1h = float(PAD), float(PAD), float(GRID_W), float(TOP_H)
+    draw_glass_card(ctx, c1x, c1y, c1w, c1h, 24.0, backdrop)
+
+    cpu_pct = telemetry.read_cpu_pct()
+    ram_used, _ram_total, ram_pct = telemetry.read_ram()
+    bat_cap, _bat_status, temp_c = telemetry.read_battery_and_temp()
+
+    pad1_x = c1x + 28
+    top1_y = c1y + 18
+    draw_glow_dot(ctx, pad1_x + 5, top1_y + 7)
+    text_ops.append((pad1_x + 16, top1_y, "GOJO // LIMITLESS", "Fira Sans SemiBold 9.5", (0.95, 0.90, 1.0, 0.92), "left", -1, 1800, False))
+
+    tz_label = now.strftime("%Z") or "WIB"
+    pill_w, pill_h = 52, 19
+    pill_x, pill_y = c1x + 314, top1_y - 2
+    rounded_rect_path(ctx, pill_x, pill_y, pill_w, pill_h, 9.5)
+    ctx.set_source_rgba(0.04, 0.03, 0.10, 0.28)
+    ctx.fill_preserve()
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.28)
+    ctx.set_line_width(1.0)
+    ctx.stroke()
+    text_ops.append((pill_x, pill_y + 2, tz_label, "DM Mono Medium 8.5", (0.98, 0.95, 1.0, 0.97), "center", pill_w, 1200, False))
+
+    time_str = now.strftime("%H:%M")
+    date_str = f"{DAYS_ID[now.weekday()]}, {now.day} {MONTHS_ID[now.month - 1]} {now.year}  ·  {greeting_id(now.hour)}"
+    text_ops.append((pad1_x - 1, c1y + 40, time_str, "Jost SemiBold 64", (0.84, 0.30, 0.96, 0.25), "left", -1, 1200, False))
+    text_ops.append((pad1_x, c1y + 38, time_str, "Jost SemiBold 64", (1.0, 1.0, 1.0, 0.99), "left", -1, 1200, False))
+    text_ops.append((pad1_x + 2, c1y + 144, date_str, "Fira Sans Medium 11.5", (0.97, 0.94, 1.0, 0.97), "left", -1, 400, False))
+
+    # Orbital Seconds Ring in center-right of Top Card
+    ring_cx, ring_cy, ring_r = c1x + 438, c1y + 94, 48.0
+    inner_glow = cairo.RadialGradient(ring_cx, ring_cy, 2, ring_cx, ring_cy, ring_r)
+    inner_glow.add_color_stop_rgba(0.0, 0.75, 0.42, 1.00, 0.12)
+    inner_glow.add_color_stop_rgba(1.0, 0.40, 0.85, 0.98, 0.0)
+    ctx.set_source(inner_glow)
+    ctx.arc(ring_cx, ring_cy, ring_r, 0, 2 * math.pi)
+    ctx.fill()
+
+    ctx.set_source_rgba(0.04, 0.03, 0.10, 0.24)
+    ctx.set_line_width(4.5)
+    ctx.arc(ring_cx, ring_cy, ring_r, 0, 2 * math.pi)
+    ctx.stroke()
+
+    for i in range(12):
+        ang = -math.pi / 2 + i * (2 * math.pi / 12)
+        ctx.set_source_rgba(1.0, 1.0, 1.0, 0.38 if i % 3 == 0 else 0.18)
+        ctx.set_line_width(1.6 if i % 3 == 0 else 1.0)
+        ctx.move_to(ring_cx + math.cos(ang) * (ring_r - 8), ring_cy + math.sin(ang) * (ring_r - 8))
+        ctx.line_to(ring_cx + math.cos(ang) * (ring_r - 4), ring_cy + math.sin(ang) * (ring_r - 4))
+        ctx.stroke()
+
+    sec = now.second
+    end_a = -math.pi / 2 + max(0.015, sec / 60.0) * 2 * math.pi
+    arc_grad = cairo.LinearGradient(ring_cx - ring_r, ring_cy - ring_r, ring_cx + ring_r, ring_cy + ring_r)
+    arc_grad.add_color_stop_rgba(0.0, 0.40, 0.91, 0.98, 0.95)
+    arc_grad.add_color_stop_rgba(0.5, 0.75, 0.42, 1.00, 0.98)
+    arc_grad.add_color_stop_rgba(1.0, 0.98, 0.34, 0.86, 1.00)
+    ctx.set_source(arc_grad)
+    ctx.set_line_width(5.2)
+    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
+    ctx.arc(ring_cx, ring_cy, ring_r, -math.pi / 2, end_a)
+    ctx.stroke()
+
+    tip_x = ring_cx + math.cos(end_a) * ring_r
+    tip_y = ring_cy + math.sin(end_a) * ring_r
+    tip_halo = cairo.RadialGradient(tip_x, tip_y, 1, tip_x, tip_y, 10)
+    tip_halo.add_color_stop_rgba(0.0, 1.0, 0.55, 0.96, 0.95)
+    tip_halo.add_color_stop_rgba(1.0, 0.84, 0.30, 0.96, 0.0)
+    ctx.set_source(tip_halo)
+    ctx.arc(tip_x, tip_y, 10, 0, 2 * math.pi)
+    ctx.fill()
+    ctx.set_source_rgba(1, 1, 1, 1)
+    ctx.arc(tip_x, tip_y, 2.7, 0, 2 * math.pi)
+    ctx.fill()
+
+    text_ops.append((ring_cx - 28, ring_cy - 20, f"{sec:02d}", "DM Mono Medium 20", (1.0, 1.0, 1.0, 0.99), "center", 56, 0, False))
+    text_ops.append((ring_cx - 28, ring_cy + 11, "DETIK", "Fira Sans SemiBold 7.5", (0.95, 0.90, 1.0, 0.92), "center", 56, 1400, False))
+
+    # Vertical divider before telemetry stack on right of Top Card
+    vdiv_x = c1x + 516
+    vdiv_g = cairo.LinearGradient(vdiv_x, c1y + 24, vdiv_x, c1y + c1h - 24)
+    vdiv_g.add_color_stop_rgba(0.0, 1.0, 1.0, 1.0, 0.0)
+    vdiv_g.add_color_stop_rgba(0.25, 0.92, 0.72, 1.0, 0.25)
+    vdiv_g.add_color_stop_rgba(0.75, 0.55, 0.88, 1.0, 0.25)
+    vdiv_g.add_color_stop_rgba(1.0, 1.0, 1.0, 1.0, 0.0)
+    ctx.set_source(vdiv_g)
+    ctx.set_line_width(1.0)
+    ctx.move_to(vdiv_x, c1y + 24)
+    ctx.line_to(vdiv_x, c1y + c1h - 24)
+    ctx.stroke()
+
+    # Right Telemetry Trio stacked cleanly
+    stat_x = vdiv_x + 24
+    stat_w = c1x + c1w - 28 - stat_x
+    pwr_label = "BAT" if bat_cap is not None else "TEMP"
+    pwr_val = f"{bat_cap}% · {temp_c}°" if (bat_cap is not None and temp_c is not None) else (
+        f"{bat_cap}%" if bat_cap is not None else (f"{temp_c}°C" if temp_c is not None else "--")
+    )
+    pwr_ratio = (bat_cap / 100.0) if bat_cap is not None else min(1.0, (temp_c or 40) / 100.0)
+    stats = [
+        ("CPU", f"{cpu_pct:.0f}%", cpu_pct / 100.0, (0.75, 0.42, 1.0), (0.96, 0.32, 0.86)),
+        ("RAM", f"{ram_used:.1f} GB", ram_pct / 100.0, (0.24, 0.78, 0.98), (0.75, 0.42, 1.0)),
+        (pwr_label, pwr_val, pwr_ratio, (0.94, 0.38, 0.90), (0.40, 0.88, 0.98)),
+    ]
+    for idx, (lbl, val, ratio, col0, col1) in enumerate(stats):
+        sy = c1y + 28 + idx * 48
+        text_ops.append((stat_x, sy, lbl, "Fira Sans SemiBold 9", (0.92, 0.88, 1.0, 0.92), "left", -1, 900, False))
+        text_ops.append((stat_x, sy - 0.5, val, "DM Mono Medium 9.5", (0.99, 0.97, 1.0, 0.98), "right", stat_w, 0, False))
+        by = sy + 21
+        draw_bar_track(ctx, stat_x, by, stat_w, 5.0, 2.5)
+        fw = max(5.0, stat_w * max(0.0, min(1.0, ratio)))
+        rounded_rect_path(ctx, stat_x, by, fw, 5.0, 2.5)
+        bg = cairo.LinearGradient(stat_x, by, stat_x + stat_w, by)
+        bg.add_color_stop_rgba(0.0, col0[0], col0[1], col0[2], 0.95)
+        bg.add_color_stop_rgba(1.0, col1[0], col1[1], col1[2], 0.95)
+        ctx.set_source(bg)
+        ctx.fill()
+
+    # ==========================================================================
+    # CARD 2: WEATHER + MONTHLY CALENDAR (Bottom-Left of Center, 372 x 250)
+    # ==========================================================================
+    c2x, c2y, c2w, c2h = float(PAD), float(PAD + TOP_H + GAP), float(BOT_W), float(BOT_H)
+    draw_glass_card(ctx, c2x, c2y, c2w, c2h, 24.0, backdrop)
+
+    pad2_x = c2x + 22
+    wd = weather.data
+    is_night = now.hour >= 18 or now.hour < 6
+    draw_weather_icon(ctx, pad2_x, c2y + 15, wd.get("icon", "cloud"), is_night)
+
+    text_ops.append((pad2_x + 50, c2y + 13, f"{wd.get('temp', '--')}°C", "Jost SemiBold 22", (1.0, 1.0, 1.0, 0.99), "left", -1, 0, False))
+    text_ops.append((pad2_x + 50, c2y + 46, f"{wd.get('cond', 'Berawan')} · {wd.get('city', 'Jakarta')}", "Fira Sans Medium 9.5", (0.96, 0.93, 1.0, 0.96), "left", 160, 0, True))
+    text_ops.append((c2x + c2w - 22 - 130, c2y + 19, f"Terasa {wd.get('feels', '--')}°", "DM Mono Medium 9", (0.82, 0.95, 1.0, 0.98), "right", 130, 0, False))
+    text_ops.append((c2x + c2w - 22 - 130, c2y + 39, f"{wd.get('humidity', '--')}% · {wd.get('wind', '--')} km/j", "DM Mono 8", (0.93, 0.90, 1.0, 0.90), "right", 130, 0, False))
+
+    div2_y = c2y + 70
+    draw_gradient_divider(ctx, pad2_x, c2x + c2w - 22, div2_y)
+
+    cal_y = div2_y + 8
+    text_ops.append((pad2_x, cal_y, f"{MONTHS_ID[now.month - 1].upper()} {now.year}", "Fira Sans SemiBold 9", (0.98, 0.95, 1.0, 0.98), "left", -1, 1400, False))
+    text_ops.append((c2x + c2w - 22 - 70, cal_y, f"MG {now.isocalendar()[1]}", "DM Mono Medium 8", (0.80, 0.93, 1.0, 0.94), "right", 70, 700, False))
+
+    cal = calendar.Calendar(firstweekday=0)
+    weeks = cal.monthdatescalendar(now.year, now.month)
+    inner2_w = c2w - 44
+    cell_w = inner2_w / 7.0
+    header2_y = cal_y + 20
+    grid2_y = header2_y + 18
+    row_h = 19.0 if len(weeks) >= 6 else 22.0
+
+    for c_idx, d_lbl in enumerate(DAYS_SHORT_ID):
+        col_c = (0.98, 0.80, 1.0, 0.95) if c_idx >= 5 else (0.90, 0.88, 0.98, 0.88)
+        text_ops.append((pad2_x + c_idx * cell_w, header2_y, d_lbl, "Fira Sans SemiBold 7.5", col_c, "center", cell_w, 600, False))
+
+    today = now.date()
+    for r_idx, wk in enumerate(weeks):
+        for c_idx, d in enumerate(wk):
+            y_cell = grid2_y + r_idx * row_h
+            if d == today:
+                px = pad2_x + c_idx * cell_w + (cell_w - 28) / 2.0
+                py = y_cell - 1.0
+                pill_g = cairo.LinearGradient(px, py, px + 28, py + 18)
+                pill_g.add_color_stop_rgba(0.0, 0.78, 0.38, 1.00, 0.96)
+                pill_g.add_color_stop_rgba(1.0, 0.96, 0.28, 0.84, 0.96)
+                rounded_rect_path(ctx, px, py, 28, 18, 9)
+                ctx.set_source(pill_g)
+                ctx.fill()
+                rounded_rect_path(ctx, px - 1.5, py - 1.5, 31, 21, 10.5)
+                ctx.set_source_rgba(0.95, 0.42, 0.98, 0.32)
+                ctx.set_line_width(1.4)
+                ctx.stroke()
+                col, fnt = (1.0, 1.0, 1.0, 1.0), "DM Mono Medium 9.5"
+            elif d.month != now.month:
+                col, fnt = (0.88, 0.86, 0.96, 0.52), "DM Mono 9"
+            elif c_idx >= 5:
+                col, fnt = (0.82, 0.94, 1.0, 0.96), "DM Mono 9"
+            else:
+                col, fnt = (0.98, 0.97, 1.0, 0.97), "DM Mono 9"
+            text_ops.append((pad2_x + c_idx * cell_w, y_cell, str(d.day), fnt, col, "center", cell_w, 0, False))
+
+    # ==========================================================================
+    # CARD 3: MEDIA + NETWORK & DISK (Bottom-Right of Center, 372 x 250)
+    # ==========================================================================
+    c3x, c3y, c3w, c3h = float(PAD + BOT_W + GAP), float(PAD + TOP_H + GAP), float(BOT_W), float(BOT_H)
+    draw_glass_card(ctx, c3x, c3y, c3w, c3h, 24.0, backdrop)
+
+    pad3_x = c3x + 22
+    inner3_w = c3w - 44
+    media = mpris.read()
+    iface, online, dl_bps, ul_bps = telemetry.read_network()
+    disk_used, disk_total, disk_pct = telemetry.read_disk_root()
+    uptime_str = telemetry.read_uptime_str()
+
+    top3_y = c3y + 18
+    if media:
+        is_playing = media["status"] == "Playing"
+        draw_glow_dot(ctx, pad3_x + 5, top3_y + 7, (0.40, 0.91, 0.98) if is_playing else (0.96, 0.42, 0.98))
+        header_txt = f"{media['player'].upper()} // {'MEMUTAR' if is_playing else 'JEDA'}"
+
+        disc_cx, disc_cy = pad3_x + 20, c3y + 62
+        disc_g = cairo.RadialGradient(disc_cx, disc_cy, 3, disc_cx, disc_cy, 20)
+        disc_g.add_color_stop_rgba(0.0, 0.96, 0.36, 0.92, 0.92)
+        disc_g.add_color_stop_rgba(0.55, 0.56, 0.25, 0.95, 0.72)
+        disc_g.add_color_stop_rgba(1.0, 0.14, 0.10, 0.28, 0.95)
+        ctx.set_source(disc_g)
+        ctx.arc(disc_cx, disc_cy, 19, 0, 2 * math.pi)
+        ctx.fill()
+        ctx.set_source_rgba(0.05, 0.04, 0.11, 1.0)
+        ctx.arc(disc_cx, disc_cy, 5, 0, 2 * math.pi)
+        ctx.fill()
+
+        pos_s, len_s = media["pos_s"], media["len_s"]
+        ratio = min(1.0, pos_s / len_s) if len_s > 0 else 0.35
+        dur_txt = f"{pos_s // 60:02d}:{pos_s % 60:02d} / {len_s // 60:02d}:{len_s % 60:02d}" if len_s > 0 else ""
+
+        pbar_x, pbar_w, pbar_y = pad3_x + 50, inner3_w - 50, c3y + 84
+        draw_bar_track(ctx, pbar_x, pbar_y, pbar_w, 4.0, 2.0)
+        rounded_rect_path(ctx, pbar_x, pbar_y, max(6.0, pbar_w * ratio), 4.0, 2.0)
+        pg = cairo.LinearGradient(pbar_x, pbar_y, pbar_x + pbar_w, pbar_y)
+        pg.add_color_stop_rgba(0.0, 0.38, 0.88, 0.99, 0.95)
+        pg.add_color_stop_rgba(1.0, 0.96, 0.34, 0.88, 0.98)
+        ctx.set_source(pg)
+        ctx.fill()
+
+        text_ops.append((pad3_x + 50, c3y + 42, media["title"], "Fira Sans SemiBold 11.5", (1.0, 1.0, 1.0, 0.99), "left", inner3_w - 50, 0, True))
+        text_ops.append((pad3_x + 50, c3y + 62, media["artist"], "Fira Sans 9.5", (0.88, 0.84, 0.98, 0.85), "left", inner3_w - 50, 0, True))
+    else:
+        draw_glow_dot(ctx, pad3_x + 5, top3_y + 7, (0.35, 0.88, 0.98) if online else (0.96, 0.32, 0.56))
+        header_txt = f"JARINGAN // {iface.upper()}" if online else "JARINGAN // OFFLINE"
+        dur_txt = "ONLINE" if online else "OFFLINE"
+
+        bx0 = c3x + c3w - 22 - 64
+        by_mid = c3y + 64
+        sec_phase = now.second * 0.65
+        for bi in range(11):
+            amp = 5.0 + 12.0 * abs(math.sin(sec_phase + bi * 0.72))
+            bx = bx0 + bi * 6
+            rounded_rect_path(ctx, bx, by_mid - amp / 2.0, 3.0, amp, 1.5)
+            ctx.set_source_rgba(0.84 if bi % 2 == 0 else 0.45, 0.52 if bi % 2 == 0 else 0.90, 1.0, 0.78)
+            ctx.fill()
+
+        text_ops.append((pad3_x + 2, c3y + 44, "Siap Memutar Media", "Fira Sans Medium 12", (0.99, 0.98, 1.0, 0.98), "left", inner3_w - 74, 0, True))
+        text_ops.append((pad3_x + 2, c3y + 66, f"Uptime {uptime_str}  ·  Pop!_OS COSMIC", "Fira Sans 9.5", (0.88, 0.92, 1.0, 0.92), "left", inner3_w - 74, 0, True))
+
+    text_ops.append((pad3_x + 16, top3_y, header_txt, "Fira Sans SemiBold 9", (0.96, 0.92, 1.0, 0.93), "left", -1, 1400, False))
+    if dur_txt:
+        text_ops.append((c3x + c3w - 22 - 105, top3_y, dur_txt, "DM Mono Medium 8.5", (0.80, 0.95, 1.0, 0.96), "right", 105, 0, False))
+
+    div3_y = c3y + 104
+    draw_gradient_divider(ctx, pad3_x, c3x + c3w - 22, div3_y)
+
+    # Bottom part of Card 3: Network Sparkline + Root Disk
+    net_y = div3_y + 14
+    spark_x, spark_y, spark_w, spark_h = pad3_x, net_y + 38, 198.0, 62.0
+    rounded_rect_path(ctx, spark_x, spark_y, spark_w, spark_h, 10)
+    ctx.set_source_rgba(0.04, 0.03, 0.10, 0.18)
+    ctx.fill_preserve()
+    ctx.set_source_rgba(1.0, 1.0, 1.0, 0.15)
+    ctx.set_line_width(0.8)
+    ctx.stroke()
+
+    dl_vals = list(telemetry.dl_hist)
+    ul_vals = list(telemetry.ul_hist)
+    peak = max(10240.0, max(dl_vals), max(ul_vals))
+
+    def draw_spark(vals, col, fill_alpha):
+        if len(vals) < 2:
+            return
+        step = spark_w / (len(vals) - 1)
+        ctx.save()
+        rounded_rect_path(ctx, spark_x, spark_y, spark_w, spark_h, 10)
+        ctx.clip()
+        ctx.move_to(spark_x, spark_y + spark_h)
+        for i, v in enumerate(vals):
+            px = spark_x + i * step
+            py = spark_y + spark_h - 6 - (v / peak) * (spark_h - 14)
+            ctx.line_to(px, py)
+        ctx.line_to(spark_x + spark_w, spark_y + spark_h)
+        ctx.close_path()
+        ctx.set_source_rgba(col[0], col[1], col[2], fill_alpha)
+        ctx.fill()
+
+        ctx.new_path()
+        for i, v in enumerate(vals):
+            px = spark_x + i * step
+            py = spark_y + spark_h - 6 - (v / peak) * (spark_h - 14)
+            if i == 0:
+                ctx.move_to(px, py)
+            else:
+                ctx.line_to(px, py)
+        ctx.set_source_rgba(col[0], col[1], col[2], 0.95)
+        ctx.set_line_width(1.8)
+        ctx.stroke()
+        ctx.restore()
+
+    draw_spark(dl_vals, (0.38, 0.88, 1.0), 0.18)
+    draw_spark(ul_vals, (0.98, 0.38, 0.90), 0.12)
+
+    disk_x = pad3_x + 214
+    disk_w = inner3_w - 214
+    dbar_y = net_y + 52
+    draw_bar_track(ctx, disk_x, dbar_y, disk_w, 7.0, 3.5)
+    dfill_w = max(7.0, disk_w * min(1.0, disk_pct / 100.0))
+    rounded_rect_path(ctx, disk_x, dbar_y, dfill_w, 7.0, 3.5)
+    dg = cairo.LinearGradient(disk_x, dbar_y, disk_x + disk_w, dbar_y)
+    dg.add_color_stop_rgba(0.0, 0.75, 0.42, 1.00, 0.95)
+    dg.add_color_stop_rgba(1.0, 0.98, 0.32, 0.78, 0.98)
+    ctx.set_source(dg)
+    ctx.fill()
+
+    text_ops.append((spark_x, net_y, f"↓ {fmt_speed(dl_bps)}", "DM Mono Medium 9", (0.58, 0.95, 1.0, 0.99), "left", -1, 0, False))
+    text_ops.append((spark_x + 98, net_y, f"↑ {fmt_speed(ul_bps)}", "DM Mono Medium 9", (0.99, 0.64, 0.97, 0.98), "right", 100, 0, False))
+    text_ops.append((spark_x, net_y + 19, "TRAFIK JARINGAN (30D)", "Fira Sans SemiBold 7", (0.90, 0.88, 1.0, 0.88), "left", -1, 700, False))
+
+    text_ops.append((disk_x, net_y, "DISK /", "Fira Sans SemiBold 9", (0.92, 0.88, 1.0, 0.92), "left", -1, 800, False))
+    text_ops.append((disk_x, net_y + 22, f"{disk_used:.0f}/{disk_total:.0f} GB", "DM Mono Medium 9.5", (0.99, 0.98, 1.0, 0.98), "left", -1, 0, False))
+    text_ops.append((disk_x, dbar_y + 16, f"{disk_pct:.0f}% TERPAKAI", "DM Mono 8", (0.96, 0.84, 1.0, 0.92), "left", -1, 0, False))
+
+    surface.flush()
+    del ctx
+    del surface
+
+    raw_arr = (ctypes.c_uint8 * len(buf)).from_buffer(buf)
+    c_surf = _libcairo.cairo_image_surface_create_for_data(raw_arr, 0, SURF_W, SURF_H, SURF_W * 4)
+    c_ctx = _libcairo.cairo_create(c_surf)
+    for x, y, txt, fnt, col, align, w_box, ls, ell in text_ops:
+        draw_text(c_ctx, x, y, txt, fnt, col, align=align, width=w_box, letter_spacing=ls, ellipsize=ell)
+    _libcairo.cairo_surface_flush(c_surf)
+    _libcairo.cairo_destroy(c_ctx)
+    _libcairo.cairo_surface_destroy(c_surf)
+    return bytes(buf)
+
+
+def _cairo_buf_to_pil(buf: bytes, w: int, h: int):
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, w, 4)).copy()
+    bgra = arr[:, :, [2, 1, 0, 3]]
+    a = bgra[:, :, 3:4].astype(np.float32) / 255.0
+    rgb = np.where(a > 0, np.clip(bgra[:, :, :3].astype(np.float32) / np.maximum(a, 1e-4), 0, 255), 0).astype(np.uint8)
+    return Image.fromarray(np.concatenate([rgb, bgra[:, :, 3:4]], axis=2))
+
+
+def make_preview(out_path: str) -> None:
+    from PIL import ImageDraw
+    import random
+    backdrops = WallpaperBackdropCache()
+    telemetry = TelemetryReader()
+    telemetry.read_cpu_pct()
+    telemetry.read_network()
+    for _ in range(25):
+        telemetry.dl_hist.append(random.uniform(40_000, 420_000))
+        telemetry.ul_hist.append(random.uniform(10_000, 120_000))
+    weather = WeatherFetcher()
+    weather.refresh_once()
+    mpris = MprisReader()
+    time.sleep(0.15)
+    now = datetime.now()
+
+    wall = Image.open(backdrops.get_wallpaper_path()).convert("RGBA").resize((SCREEN_W, SCREEN_H), Image.LANCZOS)
+    buf = render_centered_suite(bytearray(SURF_W * SURF_H * 4), telemetry, weather, mpris, now, backdrops)
+    im = _cairo_buf_to_pil(buf, SURF_W, SURF_H)
+    wall.paste(im, (POS_X, POS_Y), im)
+
+    overlay = Image.new("RGBA", (SCREEN_W, SCREEN_H), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rectangle([0, 0, SCREEN_W, 32], fill=(16, 12, 32, 150))
+    od.rounded_rectangle([4, 210, 62, 870], radius=16, fill=(16, 12, 32, 165), outline=(192, 107, 255, 70), width=1)
+    wall = Image.alpha_composite(wall, overlay)
+    wall.save(out_path)
+    print(f"Centered bento preview saved to {out_path}")
+
+
+def run_daemon() -> None:
+    backdrops = WallpaperBackdropCache()
+    telemetry = TelemetryReader()
+    telemetry.read_cpu_pct()
+    telemetry.read_network()
+    weather = WeatherFetcher()
+    weather.start_loop()
+    mpris = MprisReader()
+
+    frame_buf = bytearray(SURF_W * SURF_H * 4)
+    proc = None
+    running = True
+
+    def stop_handler(_sig, _frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop_handler)
+    signal.signal(signal.SIGINT, stop_handler)
+
+    try:
+        while running:
+            if proc is None or proc.poll() is not None:
+                proc = subprocess.Popen(
+                    [HOST_BIN, str(SURF_W), str(SURF_H), str(POS_Y), str(POS_X), "top-left"],
+                    stdin=subprocess.PIPE,
+                )
+
+            now = datetime.now()
+            frame = render_centered_suite(frame_buf, telemetry, weather, mpris, now, backdrops)
+            try:
+                proc.stdin.write(frame)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                proc = None
+                time.sleep(0.5)
+                continue
+
+            now_t = time.time()
+            sleep_s = 1.0 - (now_t % 1.0) + 0.015
+            time.sleep(min(1.05, max(0.05, sleep_s)))
+    finally:
+        if proc is not None:
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--preview":
+        out = sys.argv[2] if len(sys.argv) > 2 else "/tmp/gojo_centered_preview.png"
+        make_preview(out)
+    else:
+        run_daemon()

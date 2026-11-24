@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hollow Purple · New Tab</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: #eef2ff;
+      background:
+        radial-gradient(circle at 22% 18%, rgba(124, 58, 237, 0.28), transparent 45%),
+        radial-gradient(circle at 80% 78%, rgba(56, 189, 248, 0.20), transparent 48%),
+        linear-gradient(160deg, #090a14 0%, #0f1020 55%, #0b0c18 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+    .container { width: 100%; max-width: 780px; }
+    .hero { text-align: center; margin-bottom: 28px; }
+    .clock {
+      font-size: clamp(3rem, 7vw, 4.8rem);
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      background: linear-gradient(90deg, #f5f3ff 10%, #c084fc 55%, #38bdf8 95%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      line-height: 1.05;
+    }
+    .greeting { margin-top: 8px; font-size: 0.98rem; color: #a5b4fc; }
+    .search-wrap {
+      position: relative;
+      max-width: 580px;
+      margin: 0 auto 30px;
+    }
+    .search-input {
+      width: 100%;
+      padding: 14px 20px;
+      border-radius: 999px;
+      border: 1px solid rgba(192, 132, 252, 0.45);
+      background: rgba(16, 18, 34, 0.82);
+      color: #f8fafc;
+      font-size: 0.98rem;
+      outline: none;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .search-input:focus {
+      border-color: #c084fc;
+      box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.22), 0 12px 32px rgba(0, 0, 0, 0.45);
+    }
+    .hints {
+      margin-top: 8px;
+      text-align: center;
+      font-size: 0.78rem;
+      color: #94a3b8;
+    }
+    .hints code {
+      color: #c084fc;
+      background: rgba(139, 92, 246, 0.16);
+      padding: 1px 6px;
+      border-radius: 6px;
+    }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #c084fc;
+    }
+    .btn-mini {
+      background: rgba(139, 92, 246, 0.18);
+      color: #e9d5ff;
+      border: 1px solid rgba(192, 132, 252, 0.4);
+      border-radius: 8px;
+      padding: 4px 10px;
+      font-size: 0.76rem;
+      cursor: pointer;
+    }
+    .btn-mini:hover { background: rgba(139, 92, 246, 0.34); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 14px 16px;
+      border-radius: 14px;
+      text-decoration: none;
+      color: #eef2ff;
+      background: rgba(20, 22, 40, 0.76);
+      border: 1px solid rgba(148, 163, 184, 0.20);
+      backdrop-filter: blur(10px);
+      transition: transform 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(192, 132, 252, 0.65);
+      background: rgba(34, 28, 66, 0.82);
+    }
+    .card-title { font-weight: 650; font-size: 0.94rem; }
+    .card-sub { font-size: 0.78rem; color: #94a3b8; font-family: ui-monospace, monospace; }
+    .del-btn {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      border: none;
+      background: transparent;
+      color: #f87171;
+      font-size: 0.85rem;
+      cursor: pointer;
+      display: none;
+    }
+    .editing .del-btn { display: block; }
+    .modal {
+      position: fixed; inset: 0;
+      background: rgba(6, 7, 14, 0.72);
+      display: none; align-items: center; justify-content: center;
+      backdrop-filter: blur(6px);
+    }
+    .modal.open { display: flex; }
+    .modal-box {
+      width: 92%; max-width: 380px;
+      background: #121324;
+      border: 1px solid rgba(192, 132, 252, 0.5);
+      border-radius: 16px;
+      padding: 20px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .modal-box input {
+      padding: 10px 12px; border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      background: #0b0c18; color: #f8fafc; font-size: 0.9rem;
+    }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <div id="clock" class="clock">00:00</div>
+      <div id="greeting" class="greeting">Hollow Purple · Pop!_OS COSMIC</div>
+    </header>
+
+    <form id="search-form" class="search-wrap">
+      <input id="search-input" class="search-input" type="text" placeholder="Cari sesuatu atau ketik URL..." autofocus />
+      <div class="hints">
+        Pintasan: <code>!gh</code> GitHub · <code>!yt</code> YouTube · <code>!mdn</code> MDN · <code>!npm</code> npm
+      </div>
+    </form>
+
+    <section>
+      <div class="section-head">
+        <span>Localhost &amp; Dev</span>
+        <div style="display:flex;gap:6px;">
+          <button id="edit-btn" class="btn-mini" type="button">Edit</button>
+          <button id="add-btn" class="btn-mini" type="button">+ Tambah</button>
+        </div>
+      </div>
+      <div id="links-grid" class="grid"></div>
+    </section>
+  </main>
+
+  <div id="modal" class="modal">
+    <form id="add-form" class="modal-box">
+      <strong style="color:#c084fc;">Tambah Shortcut Baru</strong>
+      <input id="f-title" placeholder="Nama (misal: Laravel API)" required />
+      <input id="f-sub" placeholder="Label kecil (misal: :8000)" />
+      <input id="f-url" placeholder="URL (misal: http://localhost:8000)" required />
+      <div class="modal-actions">
+        <button id="cancel-btn" class="btn-mini" type="button">Batal</button>
+        <button class="btn-mini" type="submit" style="background:rgba(56,189,248,0.28);border-color:#38bdf8;">Simpan</button>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    const DAYS = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+    const MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+
+    function updateClock() {
+      const d = new Date();
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      document.getElementById("clock").textContent = `${hh}:${mm}`;
+      const h = d.getHours();
+      const salam = h < 11 ? "Selamat pagi" : h < 15 ? "Selamat siang" : h < 18 ? "Selamat sore" : "Selamat malam";
+      document.getElementById("greeting").textContent =
+        `${salam} · ${DAYS[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    document.getElementById("search-form").addEventListener("submit", e => {
+      e.preventDefault();
+      const q = document.getElementById("search-input").value.trim();
+      if (!q) return;
+      if (/^https?:\/\//i.test(q)) { location.href = q; return; }
+      if (/^localhost:\d+/i.test(q)) { location.href = "http://" + q; return; }
+      const bangs = {
+        "!gh ": "https://github.com/search?q=",
+        "!yt ": "https://www.youtube.com/results?search_query=",
+        "!mdn ": "https://developer.mozilla.org/en-US/search?q=",
+        "!npm ": "https://www.npmjs.com/search?q=",
+      };
+      for (const [prefix, url] of Object.entries(bangs)) {
+        if (q.toLowerCase().startsWith(prefix)) {
+          location.href = url + encodeURIComponent(q.slice(prefix.length));
+          return;
+        }
+      }
+      location.href = "https://www.google.com/search?q=" + encodeURIComponent(q);
+    });
+
+    const DEFAULT_LINKS = [
+      { title: "Vite Dev", sub: "localhost:5173", url: "http://localhost:5173" },
+      { title: "App Server", sub: "localhost:3000", url: "http://localhost:3000" },
+      { title: "Backend API", sub: "localhost:8000", url: "http://localhost:8000" },
+      { title: "GitHub", sub: "github.com", url: "https://github.com" },
+      { title: "YouTube", sub: "youtube.com", url: "https://youtube.com" },
+      { title: "ChatGPT", sub: "chatgpt.com", url: "https://chatgpt.com" },
+      { title: "Tailwind Docs", sub: "tailwindcss.com", url: "https://tailwindcss.com/docs" },
+      { title: "MDN Web Docs", sub: "developer.mozilla.org", url: "https://developer.mozilla.org" },
+    ];
+
+    let links = JSON.parse(localStorage.getItem("hollow_startpage_links") || "null") || DEFAULT_LINKS;
+    const grid = document.getElementById("links-grid");
+
+    function renderLinks() {
+      grid.innerHTML = "";
+      links.forEach((item, idx) => {
+        const a = document.createElement("a");
+        a.className = "card";
+        a.href = item.url;
+        a.innerHTML = `<span class="card-title"></span><span class="card-sub"></span>`;
+        a.querySelector(".card-title").textContent = item.title;
+        a.querySelector(".card-sub").textContent = item.sub || item.url;
+        const del = document.createElement("button");
+        del.className = "del-btn";
+        del.textContent = "✕";
+        del.addEventListener("click", ev => {
+          ev.preventDefault(); ev.stopPropagation();
+          links.splice(idx, 1);
+          localStorage.setItem("hollow_startpage_links", JSON.stringify(links));
+          renderLinks();
+        });
+        a.appendChild(del);
+        grid.appendChild(a);
+      });
+    }
+    renderLinks();
+
+    document.getElementById("edit-btn").addEventListener("click", () => grid.classList.toggle("editing"));
+    const modal = document.getElementById("modal");
+    document.getElementById("add-btn").addEventListener("click", () => modal.classList.add("open"));
+    document.getElementById("cancel-btn").addEventListener("click", () => modal.classList.remove("open"));
+    document.getElementById("add-form").addEventListener("submit", e => {
+      e.preventDefault();
+      let url = document.getElementById("f-url").value.trim();
+      if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+      links.push({
+        title: document.getElementById("f-title").value.trim(),
+        sub: document.getElementById("f-sub").value.trim(),
+        url,
+      });
+      localStorage.setItem("hollow_startpage_links", JSON.stringify(links));
+      renderLinks();
+      e.target.reset();
+      modal.classList.remove("open");
+    });
+  </script>
+</body>
+</html>

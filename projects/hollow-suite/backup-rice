@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# backup-rice: Snapshot seluruh kustomisasi Pop!_OS COSMIC + Zsh + Hollow Suite + Pet ke ~/rice-backup
+set -euo pipefail
+
+BACKUP_DIR="$HOME/rice-backup"
+mkdir -p "$BACKUP_DIR"/{home,config,systemd,projects,local-bin}
+
+echo "✦ Mem-backup seluruh konfigurasi rice ke $BACKUP_DIR ..."
+
+# 1. Home dotfiles
+for f in .zshrc .p10k.zsh .gitconfig; do
+  [[ -f "$HOME/$f" ]] && cp -a "$HOME/$f" "$BACKUP_DIR/home/"
+done
+
+# 2. App & CLI configs
+for d in fastfetch bat lazygit yazi nvim hollow-suite; do
+  if [[ -d "$HOME/.config/$d" ]]; then
+    rm -rf "$BACKUP_DIR/config/$d"
+    cp -a "$HOME/.config/$d" "$BACKUP_DIR/config/$d"
+  fi
+done
+if [[ -f "$HOME/.config/btop/btop.conf" ]]; then
+  mkdir -p "$BACKUP_DIR/config/btop"
+  cp -a "$HOME/.config/btop/btop.conf" "$BACKUP_DIR/config/btop/"
+fi
+
+# 3. COSMIC Desktop configs (terminal, shortcuts, dark theme)
+mkdir -p "$BACKUP_DIR/config/cosmic"
+for cd_name in com.system76.CosmicTerm com.system76.CosmicSettings.Shortcuts com.system76.CosmicTheme.Dark; do
+  if [[ -d "$HOME/.config/cosmic/$cd_name" ]]; then
+    rm -rf "$BACKUP_DIR/config/cosmic/$cd_name"
+    cp -a "$HOME/.config/cosmic/$cd_name" "$BACKUP_DIR/config/cosmic/$cd_name"
+  fi
+done
+
+# 4. Systemd user services
+for svc in cli-pet.service hollow-visualizer.service hollow-clipboard.service hollow-osd.service gojo-desktop-widget.service gojo-live-wallpaper.service cosmic-live-particles.service; do
+  [[ -f "$HOME/.config/systemd/user/$svc" ]] && cp -a "$HOME/.config/systemd/user/$svc" "$BACKUP_DIR/systemd/"
+done
+
+# 5. Custom projects (cli-pet & hollow-suite)
+for proj in cli-pet hollow-suite; do
+  src="/home/kerja/.gemini/antigravity/scratch/$proj"
+  if [[ -d "$src" ]]; then
+    rm -rf "$BACKUP_DIR/projects/$proj"
+    cp -a "$src" "$BACKUP_DIR/projects/$proj"
+    rm -rf "$BACKUP_DIR/projects/$proj/__pycache__"
+  fi
+done
+
+# 6. Existing custom Gojo/COSMIC scripts in ~/.local/bin (text scripts only, skip huge binaries)
+for script in "$HOME/.local/bin"/{gojo-*,cosmic-*,pop-lock*}; do
+  if [[ -f "$script" && ! -L "$script" ]] && file "$script" | grep -qi "text"; then
+    cp -a "$script" "$BACKUP_DIR/local-bin/"
+  fi
+done
+
+# 7. Generate restore.sh inside backup folder
+cat > "$BACKUP_DIR/restore.sh" <<'RESTORE_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "Memulihkan dotfiles & konfigurasi Hollow Purple..."
+cp -a "$DIR/home/." "$HOME/" 2>/dev/null || true
+mkdir -p "$HOME/.config/cosmic" "$HOME/.config/systemd/user" "$HOME/.local/bin"
+cp -a "$DIR/config/." "$HOME/.config/" 2>/dev/null || true
+cp -a "$DIR/systemd/." "$HOME/.config/systemd/user/" 2>/dev/null || true
+cp -a "$DIR/local-bin/." "$HOME/.local/bin/" 2>/dev/null || true
+
+mkdir -p "$HOME/.gemini/antigravity/scratch"
+cp -a "$DIR/projects/." "$HOME/.gemini/antigravity/scratch/" 2>/dev/null || true
+
+ln -sf "$HOME/.gemini/antigravity/scratch/cli-pet/pet.py" "$HOME/.local/bin/pet"
+ln -sf "$HOME/.gemini/antigravity/scratch/cli-pet/pet_overlay.py" "$HOME/.local/bin/pet-overlay"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_visualizer.py" "$HOME/.local/bin/hollow-viz"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/clipboard_daemon.py" "$HOME/.local/bin/hollow-clipboard"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_panel.py" "$HOME/.local/bin/dev-panel"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_panel.py" "$HOME/.local/bin/clip-panel"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_osd.py" "$HOME/.local/bin/hollow-osd"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_notify.py" "$HOME/.local/bin/hollow-notify"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/hollow_clock.py" "$HOME/.local/bin/hollow-clock"
+ln -sf "$HOME/.gemini/antigravity/scratch/hollow-suite/backup-rice" "$HOME/.local/bin/backup-rice"
+
+systemctl --user daemon-reload
+systemctl --user enable --now cli-pet.service hollow-visualizer.service hollow-clipboard.service hollow-osd.service 2>/dev/null || true
+echo "✓ Pemulihan selesai! Buka terminal baru untuk melihat hasilnya."
+RESTORE_EOF
+chmod +x "$BACKUP_DIR/restore.sh"
+
+# 8. Commit snapshot in local Git repo
+cd "$BACKUP_DIR"
+if [[ ! -d .git ]]; then
+  git init -b main >/dev/null
+fi
+git add -A
+if ! git diff --cached --quiet; then
+  git commit -m "backup: rice snapshot $(date '+%Y-%m-%d %H:%M')" >/dev/null
+  echo "✓ Snapshot baru disimpan di Git lokal: $BACKUP_DIR"
+else
+  echo "✓ Semua file sudah up-to-date di $BACKUP_DIR (tidak ada perubahan baru)."
+fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo ""
+  echo "Tips: Untuk backup ke GitHub pribadi, jalankan sekali:"
+  echo "  cd ~/rice-backup && gh repo create hollow-purple-dotfiles --private --source=. --push"
+else
+  echo "Tips: Jalankan 'cd ~/rice-backup && git push' untuk sinkron ke remote."
+fi

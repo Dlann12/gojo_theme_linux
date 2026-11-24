@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Menu daya ringan (GTK3) untuk Waybar di Pop!_OS COSMIC."""
+
+import subprocess
+import sys
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gtk
+
+
+CSS = b"""
+window {
+    background-color: rgba(16, 13, 28, 0.94);
+    border: 1px solid rgba(196, 140, 255, 0.42);
+    border-radius: 14px;
+}
+label.title {
+    color: #d69eff;
+    font-family: "Fira Sans", sans-serif;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 0 8px 0;
+}
+button {
+    background: rgba(34, 28, 56, 0.72);
+    color: #f3effc;
+    border: 1px solid rgba(196, 140, 255, 0.18);
+    border-radius: 10px;
+    padding: 9px 16px;
+    font-family: "Fira Sans", "FontAwesome", sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+}
+button:hover {
+    background: rgba(138, 79, 255, 0.42);
+    border-color: rgba(214, 158, 255, 0.65);
+}
+button.danger:hover {
+    background: rgba(220, 53, 95, 0.55);
+    border-color: rgba(255, 110, 145, 0.75);
+}
+"""
+
+
+class PowerMenu(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Power")
+        self.set_decorated(False)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_default_size(240, -1)
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(14)
+        box.set_margin_bottom(14)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        self.add(box)
+
+        title = Gtk.Label(label="Menu Daya")
+        title.get_style_context().add_class("title")
+        box.pack_start(title, False, False, 0)
+
+        actions = [
+            ("   Matikan Laptop", ["cosmic-osd", "shutdown"], True),
+            ("   Restart", ["cosmic-osd", "restart"], False),
+            ("   Tidur (Suspend)", ["systemctl", "suspend"], False),
+            ("   Kunci Layar", ["loginctl", "lock-session"], False),
+            ("   Keluar Sesi (Log Out)", ["cosmic-osd", "log-out"], False),
+        ]
+
+        for label, cmd, is_danger in actions:
+            btn = Gtk.Button(label=label)
+            btn.set_alignment(0.0, 0.5)
+            if is_danger:
+                btn.get_style_context().add_class("danger")
+            btn.connect("clicked", self._run_cmd, cmd)
+            box.pack_start(btn, False, False, 0)
+
+        cancel = Gtk.Button(label="Batal")
+        cancel.connect("clicked", lambda *_: Gtk.main_quit())
+        box.pack_start(cancel, False, False, 4)
+
+        self.connect("key-press-event", self._on_key)
+        self.connect("focus-out-event", lambda *_: Gtk.main_quit())
+        self.connect("destroy", Gtk.main_quit)
+
+    def _on_key(self, _widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        return False
+
+    def _run_cmd(self, _btn, cmd):
+        subprocess.Popen(cmd, start_new_session=True)
+        Gtk.main_quit()
+
+
+if __name__ == "__main__":
+    # Toggle off if already open
+    win = PowerMenu()
+    win.show_all()
+    Gtk.main()

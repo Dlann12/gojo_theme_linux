@@ -1,0 +1,15 @@
+[Unit]
+Description=Cosmic Live Wallpaper Particle Engine (Wayland Layer-Shell)
+After=graphical-session.target cosmic-session.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cosmic-live-particles --fps 28 --particles 80 --theme purple
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Lock right after login so autologin boots show the same lockscreen as after sleep.
+# pop-lockscreen's process exists long before it subscribes to logind's Lock signal
+# (heavy imports), so a single lock-session can be lost. Retry until LockedHint is set.
+uid=$(id -u)
+
+for _ in $(seq 1 60); do
+    pgrep -u "$uid" -f '/\.local/bin/pop-lockscreen$' >/dev/null && break
+    sleep 0.5
+done
+
+for _ in $(seq 1 40); do
+    sid=$(loginctl show-user "$uid" -p Display --value 2>/dev/null)
+    if [ -n "$sid" ] && [ "$(loginctl show-session "$sid" -p LockedHint --value 2>/dev/null)" = "yes" ]; then
+        exit 0
+    fi
+    loginctl lock-session ${sid:+"$sid"} 2>/dev/null
+    sleep 1
+done

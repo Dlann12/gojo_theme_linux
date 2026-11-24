@@ -1,0 +1,22 @@
+{
+    (
+        modifiers: [
+            Super,
+            Shift,
+        ],
+        key: "s",
+    ): System(Screenshot),
+    (
+        modifiers: [
+            Super,
+        ],
+        key: "v",
+    ): Spawn("/home/kerja/.local/bin/clip-panel"),
+    (
+        modifiers: [
+            Super,
+            Shift,
+        ],
+        key: "d",
+    ): Spawn("/home/kerja/.local/bin/dev-panel"),
+}

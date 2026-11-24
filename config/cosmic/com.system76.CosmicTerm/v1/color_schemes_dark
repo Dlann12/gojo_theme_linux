@@ -1,0 +1,30 @@
+{
+    (1): (
+        name: "Hollow Purple",
+        foreground: "#eef2ff",
+        background: "#0d0e1a",
+        cursor: "#c084fc",
+        bright_foreground: "#ffffff",
+        dim_foreground: "#94a3b8",
+        normal: (
+            black: "#181928",
+            red: "#f87171",
+            green: "#34d399",
+            yellow: "#fbbf24",
+            blue: "#60a5fa",
+            magenta: "#c084fc",
+            cyan: "#38bdf8",
+            white: "#e2e8f0",
+        ),
+        bright: (
+            black: "#475569",
+            red: "#fca5a5",
+            green: "#6ee7b7",
+            yellow: "#fde68a",
+            blue: "#93c5fd",
+            magenta: "#d8b4fe",
+            cyan: "#7dd3fc",
+            white: "#f8fafc",
+        ),
+    ),
+}

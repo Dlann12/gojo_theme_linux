@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "$(id -u)" -eq 1000 ] && [ "$#" -eq 0 ] && [ -x /home/kerja/.local/bin/pop-lockscreen ]; then
+    exec /usr/bin/python3 /home/kerja/.local/bin/pop-lockscreen
+fi
+exec /usr/bin/cosmic-greeter "$@"

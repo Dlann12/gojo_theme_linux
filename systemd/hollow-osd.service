@@ -1,0 +1,14 @@
+[Unit]
+Description=Hollow Purple Volume & Brightness Glass HUD (Wayland Layer-Shell)
+After=graphical-session.target cosmic-session.service pipewire-pulse.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment=GDK_BACKEND=wayland
+ExecStart=/usr/bin/python3 %h/.local/bin/hollow-osd daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
